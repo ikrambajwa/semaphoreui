@@ -1,0 +1,76 @@
+---
+- name: Download Web App for Deployment
+  become: True
+  become_user: root
+  hosts: group_client:group_server
+  gather_facts: yes
+  tasks:
+  - name: Create web-app directory:Client
+    file:
+      path: "{{ CLIENT_BASE_FOLDER }}/{{ app }}/{{ date_folder }}/bkp/"
+      owner: root
+      group: root
+      state: directory
+      mode: 0775
+    when: inventory_hostname in groups['group_client']
+  - name: Download web-app from S3 location "{{ S3_BUCKET }}"
+    amazon.aws.aws_s3:
+      profile: "{{ AWS_PROFILE }}"
+      bucket: "{{ S3_BUCKET }}"
+      mode: get
+      object: "{{ S3_PREFIX }}{{ app }}.{{ type }}"
+      dest: "{{ CLIENT_BASE_FOLDER }}/{{ app }}/{{ date_folder }}/{{ app }}.{{ type }}"
+    register: getresult
+    retries: 3
+    delay: 1
+    until: getresult.msg != "GET operation complete"
+    when: inventory_hostname in groups['group_client']
+  - debug:
+      var: getresult
+    when: getresult.changed
+  - name: Check If File web-app already exists
+    ansible.builtin.stat:
+      path: "{{ SERVER_DEPLOY_FOLDER }}/{{ app }}.{{ type }}"
+    register: file_check
+    when: inventory_hostname in groups['group_server']
+  - name: File Display Result
+    debug:
+      msg: "File exists: {{ file_check.stat.exists }}."
+    when: inventory_hostname in groups['group_server']
+  - name: Backup the war/ear file from Node1
+    synchronize:
+      src: "{{ SERVER_DEPLOY_FOLDER }}/{{ app }}.{{ type }}"
+      dest: "{{ CLIENT_BASE_FOLDER }}/{{ app }}/{{ date_folder }}/bkp/"
+      mode: pull
+    when:
+      - inventory_hostname in groups['group_server']
+      - file_check.stat.exists
+  - name: Copy the war/ear file to the Node1
+    copy:
+     src: "{{ CLIENT_BASE_FOLDER }}/{{ app }}/{{ date_folder }}/{{ app }}.{{ type }}"
+     dest: "{{ SERVER_TEMP_FOLDER }}/{{ app }}.{{ type }}"
+    when: inventory_hostname in groups['group_server']
+  - name: "Undeploy {{ app }} application"
+    community.general.jboss:
+      deploy_path: "{{ SERVER_DEPLOY_FOLDER }}"
+      deployment: "{{ app }}.{{ type }}"
+      state: absent
+    when: inventory_hostname in groups['group_server']
+  - name: Wait for 2 seconds...
+    ansible.builtin.wait_for:
+     timeout: 2
+  - name: Touch web-app
+    ansible.builtin.command: "touch {{ SERVER_TEMP_FOLDER }}/{{ app }}.{{ type }}"
+    when: inventory_hostname in groups['group_server']
+  - name: Deploy hello world application to the non-default deploy_path
+    community.general.jboss:
+      src: "{{ SERVER_TEMP_FOLDER }}/{{ app }}.{{ type }}"
+      deploy_path: "{{ SERVER_DEPLOY_FOLDER }}"
+      deployment: "{{ app }}.{{ type }}"
+      state: present
+    register: deployment_facts
+    when: inventory_hostname in groups['group_server']
+  - name: Print deployment status
+    debug:
+      msg: "Web App Changed:{{ deployment_facts.changed }} Deployment Failed Status {{ deployment_facts.failed }}"
+    when: inventory_hostname in groups['group_server']
